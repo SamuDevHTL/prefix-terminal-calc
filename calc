@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+import re
+import sys
+
+prefixes = {
+    'p': 1e-12, 'n': 1e-9, 'u': 1e-6, 'µ': 1e-6, 'm': 1e-3,
+    '': 1, 'k': 1e3, 'M': 1e6, 'G': 1e9, 'T': 1e12
+}
+
+output_prefixes = [
+    (1e12, 'T'), (1e9, 'G'), (1e6, 'M'), (1e3, 'k'),
+    (1, ''), (1e-3, 'm'), (1e-6, 'µ'), (1e-9, 'n'), (1e-12, 'p')
+]
+
+unit_aliases = {'ohm': 'Ω', 'Ohm': 'Ω', 'OHM': 'Ω'}
+
+def normalize_unit(unit):
+    return unit_aliases.get(unit, unit)
+
+def format_with_si(value):
+    abs_value = abs(value)
+    for factor, prefix in output_prefixes:
+        if abs_value >= factor:
+            scaled = value / factor
+            formatted = ('{:.3f}'.format(scaled)).rstrip('0').rstrip('.')
+            return f"{formatted}{prefix}"
+    return f"{value:.3e}"
+
+class Quantity:
+    def __init__(self, value, units=None):
+        self.value = value
+        self.units = units or {}
+
+    def __str__(self):
+        unit_str = self.format_units()
+        return f"{format_with_si(self.value)}{unit_str}"
+
+    def format_units(self):
+        if not self.units:
+            return ''
+        parts = []
+        for u, power in sorted(self.units.items()):
+            if power == 1:
+                parts.append(u)
+            else:
+                parts.append(f"{u}^{power}")
+        return ''.join(parts)
+
+    def __mul__(self, other):
+        if isinstance(other, Quantity):
+            val = self.value * other.value
+            units = self.units.copy()
+            for u, p in other.units.items():
+                units[u] = units.get(u, 0) + p
+                if units[u] == 0:
+                    del units[u]
+            return Quantity(val, units).simplify_units()
+        else:
+            return Quantity(self.value * other, self.units.copy())
+
+    def __truediv__(self, other):
+        if isinstance(other, Quantity):
+            val = self.value / other.value
+            units = self.units.copy()
+            for u, p in other.units.items():
+                units[u] = units.get(u, 0) - p
+                if units[u] == 0:
+                    del units[u]
+            return Quantity(val, units).simplify_units()
+        else:
+            return Quantity(self.value / other, self.units.copy())
+
+    def __add__(self, other):
+        if isinstance(other, Quantity):
+            if self.units == other.units:
+                return Quantity(self.value + other.value, self.units.copy())
+            else:
+                raise ValueError("Cannot add quantities with different units")
+        else:
+            raise ValueError("Can only add Quantity with Quantity")
+
+    def __sub__(self, other):
+        if isinstance(other, Quantity):
+            if self.units == other.units:
+                return Quantity(self.value - other.value, self.units.copy())
+            else:
+                raise ValueError("Cannot subtract quantities with different units")
+        else:
+            raise ValueError("Can only subtract Quantity with Quantity")
+
+    def simplify_units(self):
+        units = self.units.copy()
+
+        if units == {'Ω':1, 'A':1}:
+            return Quantity(self.value, {'V':1})
+        if units == {'V':1, 'A':-1}:
+            return Quantity(self.value, {'Ω':1})
+        if units == {'V':1, 'Ω':-1}:
+            return Quantity(self.value, {'A':1})
+        return self
+
+def parse_quantity(token):
+    m = re.match(r'^(\([^\)]+\)|[0-9.]+(?:e[+-]?[0-9]+)?)([pnuµmkMGT]?)([A-Za-zΩ]+)$', token)
+    if not m:
+        raise ValueError(f"Cannot parse quantity: {token}")
+    expr, prefix, unit = m.groups()
+    unit = normalize_unit(unit)
+    try:
+        value = eval(expr, {"__builtins__": None}, {})
+        if not isinstance(value, (int, float)):
+            raise ValueError
+    except Exception:
+        raise ValueError(f"Invalid numeric expression: {expr}")
+    factor = prefixes.get(prefix, 1)
+    return Quantity(value * factor, {unit:1})
+
+def tokenize_expr(expr):
+    token_re = re.compile(r'''
+        (\([^\)]+\)|[0-9.]+(?:e[+-]?[0-9]+)?)   # number or expression
+        \s*
+        ([pnuµmkMGT]?)                           # optional prefix
+        \s*
+        ([A-Za-zΩ]+)                            # unit
+    ''', re.VERBOSE)
+
+    tokens = []
+    pos = 0
+    length = len(expr)
+    while pos < length:
+        m = token_re.match(expr, pos)
+        if m:
+            full_token = ''.join(m.groups())
+            tokens.append(full_token)
+            pos = m.end()
+        else:
+            tokens.append(expr[pos])
+            pos += 1
+        while pos < length and expr[pos].isspace():
+            pos += 1
+    return tokens
+
+def parse_expression(expr):
+    tokens = tokenize_expr(expr)
+    quantities = []
+    expr_mod = ''
+    values = {}
+    var_index = 0
+    prev_is_quantity = False
+
+    for token in tokens:
+        m = re.match(r'^(\([^\)]+\)|[0-9.]+(?:e[+-]?[0-9]+)?)([pnuµmkMGT]?)([A-Za-zΩ]+)$', token)
+        if m:
+            q = parse_quantity(token)
+            quantities.append(q)
+
+            if prev_is_quantity:
+                expr_mod += '*'
+
+            varname = f"__q{var_index}"
+            values[varname] = q
+            expr_mod += varname
+            var_index += 1
+            prev_is_quantity = True
+        elif token in '+-*/()':
+            expr_mod += token
+            prev_is_quantity = False
+        else:
+            try:
+                float(token)
+                expr_mod += token
+                prev_is_quantity = False
+            except:
+                raise ValueError(f"Unknown token: {token}")
+
+    # Check for exactly two physical quantities → apply Ohm’s law logic
+    if len(quantities) == 2:
+        q1, q2 = quantities
+        units = [q1.units, q2.units]
+
+        if units.count({'Ω': 1}) == 1 and units.count({'V': 1}) == 1:
+            V = q1 if q1.units.get('V') else q2
+            R = q1 if q1.units.get('Ω') else q2
+            return (V / R).simplify_units()
+
+        elif units.count({'Ω': 1}) == 1 and units.count({'A': 1}) == 1:
+            I = q1 if q1.units.get('A') else q2
+            R = q1 if q1.units.get('Ω') else q2
+            return (R * I).simplify_units()
+
+        elif units.count({'V': 1}) == 1 and units.count({'A': 1}) == 1:
+            V = q1 if q1.units.get('V') else q2
+            I = q1 if q1.units.get('A') else q2
+            return (V / I).simplify_units()
+
+    env = values.copy()
+    env.update({
+        '__builtins__': None,
+        'abs': abs,
+        'pow': pow,
+    })
+
+    try:
+        result = eval(expr_mod, env)
+        if isinstance(result, Quantity):
+            return result
+        else:
+            return Quantity(result, {})
+    except Exception as e:
+        raise ValueError(f"Failed to evaluate expression: {e}")
+
+def interactive():
+    print("SI prefix calc")
+    print("--------------")
+    while True:
+        try:
+            expr = input(">>> ").strip()
+            if expr.lower() in ('exit', 'quit'):
+                break
+            if not expr:
+                continue
+            result = parse_expression(expr)
+            print(result)
+        except EOFError:
+            break
+        except Exception as e:
+            print(f"Error: {e}")
+
+def main():
+    if len(sys.argv) > 1:
+        expr = ' '.join(sys.argv[1:])
+        try:
+            res = parse_expression(expr)
+            print(res)
+        except Exception as e:
+            print(f"Error: {e}")
+    else:
+        interactive()
+
+if __name__ == "__main__":
+    main()
+
