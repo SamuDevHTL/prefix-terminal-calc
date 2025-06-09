@@ -14,6 +14,7 @@
 - [Getting Started](#getting-started)
 - [Usage Examples](#usage-examples)
 - [Unit Support](#unit-support)
+- [Roadmap](#Roadmap)
 
 ## ✨ Features
 
@@ -144,3 +145,6 @@ calc "5kΩ * 2mA"
 | M      | 10⁶   | MA      |
 | G      | 10⁹   | GA      |
 | T      | 10¹²  | TA      |
+
+## 🗺️Roadmap
+- add complex calculations like sqrt, sin, cos, log ...
